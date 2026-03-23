@@ -312,9 +312,10 @@ if __name__ == "__main__":
     _load_vocab(CHECKPOINT_DIR)
 
     # Load faction store
+    global _faction_store, _faction_store_mtime
     p = Path(FACTION_STORE_PATH)
     if p.exists():
-        _faction_store.__dict__.update(FactionStore.load(p).__dict__)
+        _faction_store = FactionStore.load(p)
         _faction_store_mtime = p.stat().st_mtime
         print(f"Loaded {len(_faction_store)} factions from {p}")
     else:

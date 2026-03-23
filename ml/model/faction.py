@@ -84,7 +84,8 @@ class FactionIdentity:
 
         with torch.no_grad():
             neutral_condition = torch.zeros(1, COND_DIM, device=device)
-            x   = vae.state_encoder(*chunk_tensors)
+            chunk_tensors_dev = tuple(t.to(device) for t in chunk_tensors)
+            x   = vae.state_encoder(*chunk_tensors_dev)
             mu, _ = vae.encoder(x, neutral_condition)
 
         encoded = mu.squeeze(0).to(device)

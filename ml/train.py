@@ -123,12 +123,19 @@ def train(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     model = ConditionalChunkVAE().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scaler    = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+    use_cuda = torch.cuda.is_available()
+    scaler   = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     # LR scheduler (activated after epoch 50)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=5, factor=0.5, verbose=True
+        optimizer, mode="min", patience=5, factor=0.5
     )
+
+    if args.chunk_size != 16:
+        raise ValueError(
+            "--chunk-size must be 16; the encoder/decoder are hardcoded for 16³ input "
+            "(three stride-2 convolutions: 16→8→4→2). Use the default --chunk-size 16."
+        )
 
     start_epoch = 0
     config = vars(args)
@@ -173,7 +180,7 @@ def train(args: argparse.Namespace) -> None:
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.amp.autocast("cuda", enabled=use_cuda):
                 outputs, mu, logvar = model(block_ids, facing, axis, half, shape, condition)
 
                 targets = {
