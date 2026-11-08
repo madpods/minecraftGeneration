@@ -879,6 +879,49 @@ def test_style_conditioning() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 22. Style blending by material swap
+# ---------------------------------------------------------------------------
+
+def test_material_swap_blend() -> None:
+    section("22. Material-swap blend — like-for-like translation, roof first, gradual")
+    from collections import Counter
+    from ml.blend import block_kind, learn_translation, swap_series
+
+    names = {1: "minecraft:smooth_sandstone", 2: "minecraft:sandstone_stairs", 3: "minecraft:wall_torch",
+             4: "minecraft:cobblestone", 5: "minecraft:spruce_stairs", 6: "minecraft:sandstone_slab",
+             7: "minecraft:spruce_slab", 8: "minecraft:sand", 9: "minecraft:dirt"}
+    assert [block_kind(names[i]) for i in (1, 2, 3, 6, 8)] == ["full", "stairs", "functional", "slab", "ground"]
+    ok("block kinds: full / stairs / functional / slab / ground")
+
+    # Style A house: sand floor (y0), sandstone walls (y1-2) with a torch, sandstone-stairs roof (y3), slab cap (y4)
+    a = torch.zeros(1, C, C, C, dtype=torch.long)
+    a[0, 4:9, 0, 4:9] = 8
+    a[0, 4:9, 1:3, 4:9] = 1
+    a[0, 6, 2, 4] = 3
+    a[0, 4:9, 3, 4:9] = 2
+    a[0, 6, 4, 6] = 6
+    # Same shape decoded in style B: dirt, cobblestone walls (torch spot now cobble), spruce-stairs roof, no slab
+    b = a.clone()
+    b[a == 8], b[a == 1], b[a == 3], b[a == 2], b[a == 6] = 9, 4, 4, 5, 0
+    tr = learn_translation(a, b, names, b_training_freq=Counter({7: 10, 4: 50}))
+    assert tr[1] == 4 and tr[2] == 5 and tr[8] == 9, tr
+    assert tr[3] == 3, "functional blocks (torch) must be kept even if the B voxel holds a wall"
+    assert tr[6] == 7, "slab with no decoded counterpart falls back to style-B training palette"
+    ok("translation: sandstone->cobble, stairs->stairs, sand->dirt, torch kept, slab via training palette")
+
+    house = {"block_ids": a[0], "facing": torch.zeros(C, C, C, dtype=torch.long)}
+    series = swap_series(house, tr, [0.0, 0.25, 0.5, 0.75, 1.0])
+    a_left = [int(((s["block_ids"] == 1) | (s["block_ids"] == 2) | (s["block_ids"] == 6) | (s["block_ids"] == 8)).sum())
+              for s in series]
+    assert a_left == sorted(a_left, reverse=True) and a_left[0] > 0 and a_left[-1] == 0, a_left
+    assert len(set(a_left)) >= 3, f"blend should pass through intermediate mixes, got {a_left}"
+    mid = series[2]["block_ids"]
+    assert (mid[4:9, 3, 4:9] == 5).all() and (mid[4:9, 0, 4:9] == 8).all(), "roof swaps before the floor"
+    assert (series[-1]["block_ids"] == 3).sum() == 1, "torch survives the whole blend"
+    ok(f"blend is gradual (style-A blocks left per step: {a_left}); roof swaps first, floor last")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -904,6 +947,7 @@ TESTS = [
     test_split_loss_and_threshold,
     test_split_files_grouping,
     test_style_conditioning,
+    test_material_swap_blend,
 ]
 
 

@@ -167,3 +167,21 @@ store.save("ml/factions.json")
 - The Node.js server (Phase 3) will persist faction vectors to CouchDB and forward world events to the Python inference server.
 - The Fabric mod (Phase 4) will trigger `record_build` calls after NPC construction completes and dispatch world events from the NPC relationship graph.
 - The faction vector is never sent to the Fabric mod — only the resulting schematic.
+
+## Gradual style change with a trained model (material swap)
+
+With a style-conditioned checkpoint (`ml.train --condition style`), faction styles can be anchored on the learned biome style vectors. The obvious way to blend two styles, averaging their vectors and decoding once, **snaps** instead of blending: on the village model the share of desert-typical blocks goes 100% → 88% → **0%** at the 50/50 point, because every voxel takes its single most likely block and the whole building flips together. Averaging the two styles' per-voxel probabilities snaps the same way.
+
+`ml/blend.py` implements a blend that is gradual:
+
+1. Decode the same latent z (= building shape) in both styles. Shape and style are largely separated (same-z occupancy IoU ≈ 0.6), so voxels line up and the model itself says what each style-A material becomes in style B.
+2. Build a translation table from that, **like for like** only (stairs→stairs, slab→slab, wall→wall, ground→ground), falling back to style B's real training palette when the decoded B houses lack a block kind. Functional blocks (beds, chests, torches, water, workstations) are never translated.
+3. Swap whole materials over in order of height — roof and trim first, walls next, floor last — in proportion to their voxel share.
+
+Desert → taiga with the village model: sandstone → cobblestone, sand → dirt, sandstone/acacia stairs → spruce stairs, sandstone wall → cobblestone wall, sandstone slabs → smooth stone slabs. Desert-typical share per step: **100 → 77 → 57 → 25 → 0%**; the 50/50 point is a sandstone house with a spruce roof.
+
+```bash
+python -m ml.blend --checkpoint <style checkpoint>/best.pt --a desert --b taiga --out ml/samples/blends
+```
+
+This maps directly onto the event methods: `cultural_exchange` / `conquest` move a faction's blend weight between styles, and the swap keeps the faction's existing building shape while its materials drift. Writes `blend_{condition,logit,swap}_shapeN_<a><pct>_<b><pct>.nbt` for side-by-side comparison in game.
