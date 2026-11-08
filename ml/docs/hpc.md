@@ -55,10 +55,12 @@ SBATCH_EXTRA="--partition=dgxh --constraint=el9" bash scripts/slurm/submit_sweep
 On the cluster, summarise (light enough for the login node):
 
 ```bash
-module load $(cat .venv-gpu/modules.env) && source .venv-gpu/bin/activate
-python -m ml.summarize ml/checkpoints
+module load `cat .venv-gpu/modules.env`
+.venv-gpu/bin/python -m ml.summarize ml/checkpoints
 tar czf results_v1.tgz ml/samples ml/checkpoints/*/eval.txt
 ```
+
+Use the venv's interpreter directly (`.venv-gpu/bin/python`) rather than `source .venv-gpu/bin/activate`: the default login shell may be tcsh, where the bash `activate` script and `$(...)` don't work, and a bare `python` is the system 3.6 (`SyntaxError: future feature annotations is not defined`). Backticks work in both bash and tcsh.
 
 Then on the local machine:
 
