@@ -135,7 +135,7 @@ Epoch   42/100 | loss=2.3451  recon=1.8234  kl=0.5217  block_acc=0.4821  kl_w=1.
 | Field | Meaning |
 |---|---|
 | `loss` | Total ELBO loss (recon + kl_weight × kl) |
-| `recon` | Weighted reconstruction loss across all 5 block state components |
+| `recon` | Weighted reconstruction loss across all 5 block state components (nats per chunk, so values are in the thousands) |
 | `kl` | KL divergence, normalized by batch size |
 | `block_acc` | Fraction of voxels where the predicted block ID argmax matches ground truth |
 | `kl_w` | Current KL weight (0 → 1 over first 20 epochs) |

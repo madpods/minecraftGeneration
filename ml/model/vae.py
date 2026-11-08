@@ -201,6 +201,18 @@ class ConditionalChunkVAE(nn.Module):
 # Loss function
 # ---------------------------------------------------------------------------
 
+def _ce_per_sample(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    Cross-entropy summed over all voxels, averaged over the batch.
+
+    Summing over voxels (instead of F.cross_entropy's default mean over
+    B*16^3 positions) keeps the reconstruction term on the same per-sample
+    scale as the KL term, which is a sum over latent dims per sample. With
+    the mean, KL was ~4096x too strong and pushed toward posterior collapse.
+    """
+    return F.cross_entropy(logits.float(), target.long(), reduction="sum") / logits.shape[0]
+
+
 def vae_loss(
     outputs:   dict[str, torch.Tensor],   # raw logits from decoder
     targets:   dict[str, torch.Tensor],   # integer ground truth [B, 16, 16, 16]
@@ -218,18 +230,22 @@ def vae_loss(
         half     × 0.3
         shape    × 0.3
 
-    KL term: normalized by batch size, scaled by kl_weight (annealed during training).
+    Each reconstruction term is summed over the 16^3 voxels and averaged over
+    the batch (per-sample nats), matching the KL term's scale.
+
+    KL term: summed over latent dims, averaged over the batch, scaled by
+    kl_weight (annealed during training).
 
     Returns:
         total_loss  — scalar
         recon_loss  — scalar (unweighted sum for logging)
         kl_loss     — scalar (unnormalized for logging)
     """
-    recon_block  = F.cross_entropy(outputs["block_id"], targets["block_id"])
-    recon_facing = F.cross_entropy(outputs["facing"],   targets["facing"])
-    recon_axis   = F.cross_entropy(outputs["axis"],     targets["axis"])
-    recon_half   = F.cross_entropy(outputs["half"],     targets["half"])
-    recon_shape  = F.cross_entropy(outputs["shape"],    targets["shape"])
+    recon_block  = _ce_per_sample(outputs["block_id"], targets["block_id"])
+    recon_facing = _ce_per_sample(outputs["facing"], targets["facing"])
+    recon_axis   = _ce_per_sample(outputs["axis"], targets["axis"])
+    recon_half   = _ce_per_sample(outputs["half"], targets["half"])
+    recon_shape  = _ce_per_sample(outputs["shape"], targets["shape"])
 
     recon = (
         recon_block  * 1.0
@@ -240,6 +256,7 @@ def vae_loss(
     )
 
     # KL divergence: -0.5 * sum(1 + logvar - mu² - exp(logvar))
+    mu, logvar = mu.float(), logvar.float()
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
 
     total = recon + kl_weight * kl

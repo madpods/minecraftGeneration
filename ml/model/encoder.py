@@ -72,6 +72,7 @@ class Encoder(nn.Module):
         h = torch.cat([h, c], dim=-1)    # [B, 1024 + COND_DIM]
 
         mu     = self.mu_head(h)         # [B, LATENT_DIM]
-        logvar = self.logvar_head(h)     # [B, LATENT_DIM]
+        # Clamp so exp(logvar) can't overflow (esp. under fp16 autocast)
+        logvar = self.logvar_head(h).clamp(-10.0, 10.0)  # [B, LATENT_DIM]
 
         return mu, logvar

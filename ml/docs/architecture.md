@@ -113,6 +113,8 @@ total = recon + kl_weight * kl
 
 `block_id` is weighted highest because predicting the wrong material is more damaging to visual quality than predicting a slightly wrong orientation.
 
+Each reconstruction term is cross-entropy summed over the 16³ voxels and averaged over the batch, so it sits on the same per-sample scale as the KL term. `logvar` is clamped to [-10, 10] in the encoder to keep `exp(logvar)` finite under fp16.
+
 ## KL annealing
 
 Without annealing, the KL term dominates early in training and forces the encoder to collapse all inputs onto the prior — the decoder then ignores the latent code entirely (posterior collapse), and generation becomes unconditional noise.
