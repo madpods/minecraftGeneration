@@ -5,11 +5,18 @@ Each Minecraft block is represented as a combination of:
   - block_id:  integer index into a vocabulary of block types
   - facing:    cardinal/vertical direction the block faces
   - axis:      orientation axis (for logs, pillars, etc.)
-  - half:      top/bottom half (for slabs, stairs, etc.)
-  - shape:     stair shape variant
+  - half:      vertical / part variant. Shared slot for several Minecraft
+               properties that never co-occur on one block (the block_id
+               disambiguates): stairs/trapdoor `half` (top/bottom), slab
+               `type` (top/bottom/double), door & tall-plant `half`
+               (upper/lower), bed `part` (head/foot)
+  - shape:     handedness variant. Stair `shape` (straight/inner_*/outer_*),
+               door `hinge` (left/right), chest `type` (left/right)
+
+See ml/data/block_encoding.py for the property <-> index mapping.
 
 All components are encoded separately and concatenated to form a per-voxel
-representation of dimension 33 (16 + 3 + 4 + 2 + 8).
+representation of dimension 35 (16 + 3 + 4 + 4 + 8).
 """
 
 from __future__ import annotations
@@ -24,8 +31,8 @@ import torch.nn as nn
 NUM_BLOCK_TYPES: int = 256   # base block IDs mapped to Minecraft namespaced IDs externally
 NUM_FACING: int = 7          # north, south, east, west, up, down, none
 NUM_AXIS: int = 4            # x, y, z, none
-NUM_HALF: int = 3            # top, bottom, none
-NUM_SHAPE: int = 7           # straight, inner_left, inner_right, outer_left, outer_right, none (×2 spare)
+NUM_HALF: int = 8            # top, bottom, none, double, upper, lower, head, foot
+NUM_SHAPE: int = 8           # straight, inner_left, inner_right, outer_left, outer_right, none, left, right
 
 # ---------------------------------------------------------------------------
 # Embedding / projection dimensions
@@ -35,10 +42,10 @@ BLOCK_EMBED_DIM: int = 16
 # Facing uses a raw 3D unit vector — no learnable embedding, dim=3
 FACING_DIM: int = 3
 AXIS_EMBED_DIM: int = 4
-HALF_EMBED_DIM: int = 2
+HALF_EMBED_DIM: int = 4
 SHAPE_EMBED_DIM: int = 8
 
-# Combined per-voxel feature dim: 16 + 3 + 4 + 2 + 8 = 33
+# Combined per-voxel feature dim: 16 + 3 + 4 + 4 + 8 = 35
 VOXEL_DIM: int = BLOCK_EMBED_DIM + FACING_DIM + AXIS_EMBED_DIM + HALF_EMBED_DIM + SHAPE_EMBED_DIM
 
 # ---------------------------------------------------------------------------
@@ -96,10 +103,16 @@ AXIS_INDEX: dict[str, int] = {
 # Half index mapping
 # ---------------------------------------------------------------------------
 
+# Indices 0-2 are the original values; 3+ were added for slabs, doors, beds.
 HALF_INDEX: dict[str, int] = {
     "top":    0,
     "bottom": 1,
     "none":   2,
+    "double": 3,   # slab type=double
+    "upper":  4,   # door / tall plant half=upper
+    "lower":  5,   # door / tall plant half=lower
+    "head":   6,   # bed part=head
+    "foot":   7,   # bed part=foot
 }
 
 # ---------------------------------------------------------------------------
@@ -113,7 +126,8 @@ SHAPE_INDEX: dict[str, int] = {
     "outer_left":  3,
     "outer_right": 4,
     "none":        5,
-    "spare":       6,  # unused slot to reach NUM_SHAPE=7
+    "left":        6,  # door hinge=left / chest type=left
+    "right":       7,  # door hinge=right / chest type=right
 }
 
 
@@ -168,7 +182,7 @@ class BlockStateEncoder(nn.Module):
         # facing_vectors: [7, 3] → index with facing_ids → [B, 16, 16, 16, 3]
         e_facing = self.facing_vectors[facing_ids]  # [B, 16, 16, 16, 3]
 
-        # Concatenate along last dim → [B, 16, 16, 16, VOXEL_DIM=33]
+        # Concatenate along last dim → [B, 16, 16, 16, VOXEL_DIM=35]
         combined = torch.cat([e_block, e_facing, e_axis, e_half, e_shape], dim=-1)
 
         # Permute to channels-first: [B, VOXEL_DIM, 16, 16, 16]

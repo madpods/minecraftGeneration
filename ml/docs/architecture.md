@@ -23,12 +23,12 @@ Instead, each voxel is encoded as **five separate integer components**:
 | `block_id` | 256 | 16 | Maps to Minecraft namespaced IDs via `vocab.json` |
 | `facing` | 7 | 3 (raw vector) | north/south/east/west/up/down/none; no learned embedding |
 | `axis` | 4 | 4 | x/y/z/none |
-| `half` | 3 | 2 | top/bottom/none |
-| `shape` | 7 | 8 | straight/inner_left/inner_right/outer_left/outer_right/none |
+| `half` | 8 | 4 | top/bottom/none/double/upper/lower/head/foot — stairs, trapdoors, slabs, doors, beds |
+| `shape` | 8 | 8 | straight/inner_left/inner_right/outer_left/outer_right/none/left/right — stairs, door hinges, chests |
 
-Facing uses raw 3D unit vectors instead of a learned embedding because the geometry is already fully specified — north is always `[0,0,-1]`. The five component representations are concatenated to form a **33-dimensional per-voxel feature vector**.
+Facing uses raw 3D unit vectors instead of a learned embedding because the geometry is already fully specified — north is always `[0,0,-1]`. The five component representations are concatenated to form a **35-dimensional per-voxel feature vector**. See [data_pipeline.md](data_pipeline.md#block-state-encoding) for which Minecraft properties map to `half` and `shape`.
 
-The `BlockStateEncoder` (`ml/model/block_state.py`) applies the embedding tables across the full 16×16×16 grid and permutes to channels-first layout `[B, 33, 16, 16, 16]`.
+The `BlockStateEncoder` (`ml/model/block_state.py`) applies the embedding tables across the full 16×16×16 grid and permutes to channels-first layout `[B, 35, 16, 16, 16]`.
 
 The decoder produces **five separate logit heads** — one per component — and each is trained with an independent cross-entropy loss. This keeps the output space small and lets each component be weighted differently in the loss.
 
@@ -37,10 +37,10 @@ The decoder produces **five separate logit heads** — one per component — and
 File: `ml/model/encoder.py`
 
 ```
-Input:  [B, 33, 16, 16, 16]   (from BlockStateEncoder)
+Input:  [B, 35, 16, 16, 16]   (from BlockStateEncoder)
         + condition c [B, 209]
 
-Conv3d(33 → 32,  k=4, stride=2, pad=1)  BN  ReLU   →  [B,  32, 8, 8, 8]
+Conv3d(35 → 32,  k=4, stride=2, pad=1)  BN  ReLU   →  [B,  32, 8, 8, 8]
 Conv3d(32 → 64,  k=4, stride=2, pad=1)  BN  ReLU   →  [B,  64, 4, 4, 4]
 Conv3d(64 → 128, k=4, stride=2, pad=1)  BN  ReLU   →  [B, 128, 2, 2, 2]
 
@@ -68,8 +68,8 @@ ConvTranspose3d( 32 → 32, k=4, stride=2, pad=1)  BN  ReLU   →  [B, 32, 16, 1
 Conv3d(32 → 256, k=1)  →  block_id logits  [B, 256, 16, 16, 16]
 Conv3d(32 →   7, k=1)  →  facing logits    [B,   7, 16, 16, 16]
 Conv3d(32 →   4, k=1)  →  axis logits      [B,   4, 16, 16, 16]
-Conv3d(32 →   3, k=1)  →  half logits      [B,   3, 16, 16, 16]
-Conv3d(32 →   7, k=1)  →  shape logits     [B,   7, 16, 16, 16]
+Conv3d(32 →   8, k=1)  →  half logits      [B,   8, 16, 16, 16]
+Conv3d(32 →   8, k=1)  →  shape logits     [B,   8, 16, 16, 16]
 ```
 
 No activation is applied after the output heads — the loss function handles the softmax internally via `F.cross_entropy`.

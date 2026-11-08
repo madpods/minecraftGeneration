@@ -5,20 +5,24 @@ Supports:
   - Four 90° rotations around the vertical (Y) axis, rotating in the XZ plane.
   - Mirror flip on the X axis.
 
-After spatial rotation/flip, facing state values are remapped so that block
-orientations remain physically correct — e.g. a block facing north in the
-original chunk should face east after a 90° clockwise rotation.
+After spatial rotation/flip, state values are remapped so that block
+orientations remain physically correct:
+  - facing: a block facing north faces east after a 90° clockwise rotation
+  - axis:   x <-> z swap on 90°/270° rotations (logs, pillars)
+  - shape:  left <-> right swap on mirror (stair corners, door hinges, chests)
 
 Tensor layout: all spatial tensors are assumed to have shape [16, 16, 16]
-with dimensions ordered (X, Y, Z). Rotations use torch.rot90 on dims (0, 2),
-i.e. the XZ plane, leaving Y (vertical) unchanged.
+with dimensions ordered (X, Y, Z), using Minecraft's axes: +X = east,
++Z = south, +Y = up. Seen from above with north at the top, +X points right
+and +Z points down, so torch.rot90(k=1, dims=(0, 2)) — which rotates +X
+toward +Z — is a 90° CLOCKWISE turn (east -> south).
 """
 
 from __future__ import annotations
 
 import torch
 
-from ..model.block_state import FACING_INDEX
+from ..model.block_state import AXIS_INDEX, FACING_INDEX, SHAPE_INDEX
 
 # ---------------------------------------------------------------------------
 # Facing remap tables
@@ -57,25 +61,39 @@ MIRROR_FACING_MAP: dict[str, str] = {
 _VERTICAL_DIRECTIONS: set[str] = {"up", "down", "none"}
 
 
-def _build_facing_remap(
-    facing_map: dict[str, str],
-) -> torch.Tensor:
+# 90°/270° rotations turn X-aligned blocks into Z-aligned ones and vice versa
+AXIS_SWAP_MAP: dict[str, str] = {"x": "z", "z": "x"}
+
+# A mirror reverses handedness: every left becomes right
+MIRROR_SHAPE_MAP: dict[str, str] = {
+    "inner_left":  "inner_right",
+    "inner_right": "inner_left",
+    "outer_left":  "outer_right",
+    "outer_right": "outer_left",
+    "left":        "right",
+    "right":       "left",
+}
+
+
+def _build_remap(index: dict[str, int], value_map: dict[str, str]) -> torch.Tensor:
     """
-    Build a 1D integer remap tensor of shape [NUM_FACING] such that
-    remap[old_facing_idx] = new_facing_idx.
+    Build a 1D integer remap tensor of shape [len(index)] such that
+    remap[old_idx] = new_idx.
     """
-    remap = list(range(len(FACING_INDEX)))   # identity by default
-    for src_name, dst_name in facing_map.items():
-        remap[FACING_INDEX[src_name]] = FACING_INDEX[dst_name]
+    remap = list(range(len(index)))   # identity by default
+    for src_name, dst_name in value_map.items():
+        remap[index[src_name]] = index[dst_name]
     return torch.tensor(remap, dtype=torch.long)
 
 
 # Pre-built remap tensors for fast index substitution
 _ROTATION_REMAP: dict[int, torch.Tensor] = {
-    rot: _build_facing_remap(facing_map)
+    rot: _build_remap(FACING_INDEX, facing_map)
     for rot, facing_map in ROTATION_MAP.items()
 }
-_MIRROR_REMAP: torch.Tensor = _build_facing_remap(MIRROR_FACING_MAP)
+_MIRROR_REMAP: torch.Tensor = _build_remap(FACING_INDEX, MIRROR_FACING_MAP)
+_AXIS_SWAP_REMAP: torch.Tensor = _build_remap(AXIS_INDEX, AXIS_SWAP_MAP)
+_MIRROR_SHAPE_REMAP: torch.Tensor = _build_remap(SHAPE_INDEX, MIRROR_SHAPE_MAP)
 
 
 # ---------------------------------------------------------------------------
@@ -107,19 +125,21 @@ def augment_chunk(
     if rotation == 0:
         return {k: v.clone() for k, v in tensors.items()}
 
-    # Number of 90° CCW steps for torch.rot90.
-    # torch.rot90 with k=1 rotates CCW; we want CW, so k = (4 - steps) % 4.
-    steps_ccw = {90: 3, 180: 2, 270: 1}[rotation]
+    # torch.rot90(k=1, dims=(0, 2)) is one clockwise quarter turn in Minecraft
+    # coordinates (see module docstring), so k is simply rotation / 90.
+    k = rotation // 90
 
     result: dict[str, torch.Tensor] = {}
     remap = _ROTATION_REMAP[rotation]
 
     for key, t in tensors.items():
-        rotated = torch.rot90(t, k=steps_ccw, dims=(0, 2))  # spatial rotation
+        rotated = torch.rot90(t, k=k, dims=(0, 2))  # spatial rotation
 
         if key == "facing":
             # Remap facing indices: apply remap[old_idx] = new_idx element-wise
             rotated = remap[rotated.long()].to(t.dtype)
+        elif key == "axis" and rotation in (90, 270):
+            rotated = _AXIS_SWAP_REMAP[rotated.long()].to(t.dtype)
 
         result[key] = rotated
 
@@ -130,7 +150,8 @@ def mirror_chunk(
     tensors: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     """
-    Mirror a chunk by flipping the X axis and swapping east ↔ west facing values.
+    Mirror a chunk by flipping the X axis, swapping east ↔ west facing values,
+    and swapping left ↔ right shape values (a mirror reverses handedness).
 
     Args:
         tensors: Dict with keys block_ids, facing, axis, half, shape.
@@ -146,6 +167,8 @@ def mirror_chunk(
 
         if key == "facing":
             flipped = _MIRROR_REMAP[flipped.long()].to(t.dtype)
+        elif key == "shape":
+            flipped = _MIRROR_SHAPE_REMAP[flipped.long()].to(t.dtype)
 
         result[key] = flipped
 

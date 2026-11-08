@@ -30,33 +30,46 @@ class ChunkDataset(Dataset[tuple[dict[str, torch.Tensor], dict[str, Any]]]):
     Dataset of pre-processed Minecraft chunk tensors.
 
     Args:
-        data_dir: Directory containing .pt chunk files (from chunk_scraper).
+        data_dir: Directory containing .pt chunk files (from template_extractor
+                  or chunk_scraper).
         augment:  If True, apply random 90°/180°/270° rotation and a 50%
                   chance of mirror flip per item.
+        files:    Optional explicit subset of .pt files (e.g. a train/val split).
+                  Defaults to every .pt file in data_dir.
+        repeat:   Virtually repeat the file list this many times per epoch.
+                  Useful for small datasets so one "epoch" sees each item under
+                  several random augmentations.
     """
 
     _ROTATIONS: list[int] = [0, 90, 180, 270]
 
-    def __init__(self, data_dir: str | Path, augment: bool = True) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        augment: bool = True,
+        files: list[Path] | None = None,
+        repeat: int = 1,
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.augment  = augment
+        self.repeat   = max(1, repeat)
 
-        self.files: list[Path] = sorted(self.data_dir.glob("*.pt"))
+        self.files: list[Path] = sorted(files) if files is not None else sorted(self.data_dir.glob("*.pt"))
         if not self.files:
             raise FileNotFoundError(
                 f"No .pt chunk files found in {self.data_dir}. "
-                "Run chunk_scraper.scrape_world() first, or generate synthetic data."
+                "Run ml.data.template_extractor (or chunk_scraper.scrape_world) first."
             )
 
     def __len__(self) -> int:
-        return len(self.files)
+        return len(self.files) * self.repeat
 
     def __getitem__(
         self,
         idx: int,
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         tensors: dict[str, torch.Tensor] = torch.load(
-            self.files[idx], weights_only=True
+            self.files[idx % len(self.files)], weights_only=True
         )
 
         if self.augment:

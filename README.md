@@ -34,9 +34,10 @@ minecraftGeneration/
 ├── ml/                     # Python ML pipeline  <-- implemented
 │   ├── model/              # VAE, encoder, decoder, block state, factions
 │   ├── data/               # data scraping, augmentation, dataset classes
-│   ├── tests/              # smoke test suite (13/13 passing)
+│   ├── tests/              # smoke test suite (18/18 passing)
 │   ├── docs/               # in-depth documentation
 │   ├── train.py            # training script
+│   ├── evaluate.py         # reconstructions / samples -> structure .nbt files
 │   ├── inference.py        # Flask inference server
 │   └── requirements.txt
 ├── server/                 # Node.js inference server  [future]
@@ -45,33 +46,37 @@ minecraftGeneration/
 
 ## Quick start
 
-**Requirements:** Python 3.11+, pip.
+**Requirements:** Python 3.11+, pip, and a Minecraft Java client jar (1.20.1 tested) for training data. Training runs fine on CPU.
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies (CPU-only torch is fine)
+python -m venv .venv && .venv/Scripts/activate        # Windows; use bin/activate elsewhere
 pip install -r ml/requirements.txt
 
 # 2. Run the smoke tests to verify everything is working
-cd /path/to/minecraftGeneration
 python -m ml.tests.smoke_test
-# Expected: All 13/13 tests passed.
+# Expected: All 18/18 tests passed.
 
-# 3. Train on synthetic data (no Minecraft world needed)
-python -m ml.train \
-    --data-dir   /tmp/no-data-here \
-    --output-dir ml/checkpoints \
-    --epochs     50 \
-    --batch-size 16
-# The trainer auto-detects the missing data dir and falls back to
-# SyntheticChunkDataset for smoke-testing the full loop.
+# 3. Extract the vanilla village houses from your game jar
+python -m ml.data.template_extractor \
+    --jar "<minecraft dir>/versions/1.20.1/1.20.1.jar" \
+    --output-dir ml/data/chunks
+# Extracted 149 templates to ml/data/chunks (157 block types).
 
-# 4. Start the inference server
+# 4. Train (held-out 10% validation split; --air-weight < 1 counters the ~95% air)
+python -m ml.train --data-dir ml/data/chunks --output-dir ml/checkpoints \
+    --epochs 80 --repeat 8 --air-weight 0.3
+
+# 5. Inspect results: metrics, ASCII slices, and .nbt files you can load in game
+python -m ml.evaluate --checkpoint ml/checkpoints/best.pt --out ml/samples
+
+# 6. Start the inference server
 python -m ml.inference
-# Loads the latest checkpoint from ml/checkpoints/
+# Loads ml/checkpoints/best.pt (or the latest epoch checkpoint)
 # Listening on http://localhost:5000
 ```
 
-To train on real Minecraft data, see [ml/docs/data_pipeline.md](ml/docs/data_pipeline.md).
+Without a data dir, `ml.train` falls back to random synthetic chunks, which only exercises the plumbing. See [ml/docs/data_pipeline.md](ml/docs/data_pipeline.md) for the data sources.
 
 ## Documentation
 

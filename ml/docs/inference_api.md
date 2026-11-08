@@ -21,7 +21,8 @@ python -m ml.inference
 
 | Variable | Default | Description |
 |---|---|---|
-| `ML_CHECKPOINT_DIR` | `ml/checkpoints` | Directory scanned for `checkpoint_epoch_*.pt` files; latest is loaded |
+| `ML_CHECKPOINT_DIR` | `ml/checkpoints` | Loads `best.pt` if present, otherwise the latest `checkpoint_epoch_*.pt`. `vocab.json` is read from here too |
+| `ML_USE_CONDITION_BUILDER` | `0` | Set to `1` only once conditional training exists. Until then the server uses a zero condition vector, matching training — the `ConditionBuilder` is untrained and its output would be noise to the decoder, so `tile_type`, `purpose`, `size` and face fields currently have no effect |
 | `ML_FACTION_STORE` | `ml/factions.json` | Path to the faction store JSON; reloaded automatically when modified |
 | `ML_PORT` | `5000` | Port to listen on |
 
@@ -98,8 +99,10 @@ Face values:
   "schematic": [
     [
       [
-        { "id": "minecraft:stone_bricks", "facing": "none", "axis": "none", "half": "none", "shape": "none" },
-        { "id": "minecraft:air",          "facing": "none", "axis": "none", "half": "none", "shape": "none" },
+        { "id": "minecraft:oak_slab", "facing": "none", "axis": "none", "half": "top", "shape": "none",
+          "properties": { "type": "top" } },
+        { "id": "minecraft:air",      "facing": "none", "axis": "none", "half": "none", "shape": "none",
+          "properties": {} },
         ...
       ],
       ...
@@ -116,8 +119,9 @@ Block state fields:
 - `id` — Minecraft namespaced block ID (e.g. `minecraft:oak_stairs`)
 - `facing` — one of: `north`, `south`, `east`, `west`, `up`, `down`, `none`
 - `axis` — one of: `x`, `y`, `z`, `none`
-- `half` — one of: `top`, `bottom`, `none`
-- `shape` — one of: `straight`, `inner_left`, `inner_right`, `outer_left`, `outer_right`, `none`
+- `half` — one of: `top`, `bottom`, `double`, `upper`, `lower`, `head`, `foot`, `none` (raw model channel)
+- `shape` — one of: `straight`, `inner_left`, `inner_right`, `outer_left`, `outer_right`, `left`, `right`, `none` (raw model channel)
+- `properties` — the same information as real Minecraft property names for this block (e.g. slab → `type`, door → `half` + `hinge`, bed → `part`, chest → `type`). This is what the mod should apply to the `BlockState`.
 
 If the model was trained without a vocabulary file, block IDs are returned as `unknown:N` strings.
 

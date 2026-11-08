@@ -16,6 +16,19 @@ Saved file format (torch.save):
 
 A shared vocabulary JSON file "vocab.json" is written next to the .pt files,
 mapping Minecraft namespaced block IDs → integer indices.
+
+STATUS: UNTESTED / KNOWN ISSUES — for village data use
+ml/data/template_extractor.py instead. Before relying on this scraper:
+  - load_chunk() re-opens the whole world for every chunk (very slow);
+    open the level once in scrape_world() and pass it in.
+  - amulet's Chunk.get_block() is believed to return a single Block, so
+    `block, _ = chunk.get_block(...)` would raise and be swallowed by the
+    bare except, leaving every voxel as air (=> zero chunks saved).
+  - amulet returns blocks in its "universal" format by default (namespace
+    "universal_minecraft"); convert to a concrete Java version first.
+  - A fixed y_offset slice misses buildings on varying terrain, and
+    is_interesting() rejects >60% air, which rejects most buildings
+    (village houses are ~95% air in a 16³ box).
 """
 
 from __future__ import annotations
@@ -36,6 +49,7 @@ from ..model.block_state import (
     NUM_BLOCK_TYPES,
     SHAPE_INDEX,
 )
+from .block_encoding import encode_properties
 
 # ---------------------------------------------------------------------------
 # Block vocabulary (built dynamically during scraping)
@@ -78,20 +92,8 @@ def load_vocab(vocab_path: str | Path) -> None:
 # Block state extraction helpers
 # ---------------------------------------------------------------------------
 
-def _extract_facing(props: dict[str, str]) -> int:
-    return FACING_INDEX.get(props.get("facing", "none"), FACING_INDEX["none"])
-
-
-def _extract_axis(props: dict[str, str]) -> int:
-    return AXIS_INDEX.get(props.get("axis", "none"), AXIS_INDEX["none"])
-
-
-def _extract_half(props: dict[str, str]) -> int:
-    return HALF_INDEX.get(props.get("half", "none"), HALF_INDEX["none"])
-
-
-def _extract_shape(props: dict[str, str]) -> int:
-    return SHAPE_INDEX.get(props.get("shape", "none"), SHAPE_INDEX["none"])
+# Property -> channel mapping lives in ml/data/block_encoding.py
+# (shared with the template extractor, exporter and inference server).
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +207,12 @@ def load_chunk(
                 props: dict[str, str] = {
                     k: str(v) for k, v in (block.properties or {}).items()
                 }
-                facing_grid[x][y][z] = _extract_facing(props)
-                axis_grid[x][y][z]   = _extract_axis(props)
-                half_grid[x][y][z]   = _extract_half(props)
-                shape_grid[x][y][z]  = _extract_shape(props)
+                (
+                    facing_grid[x][y][z],
+                    axis_grid[x][y][z],
+                    half_grid[x][y][z],
+                    shape_grid[x][y][z],
+                ) = encode_properties(props)
 
     level.close()
 

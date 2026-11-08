@@ -1,7 +1,7 @@
 """
 3D convolutional encoder for the ConditionalChunkVAE.
 
-Takes a block state feature volume [B, 33, 16, 16, 16] and a condition vector
+Takes a block state feature volume [B, VOXEL_DIM=35, 16, 16, 16] and a condition vector
 [B, COND_DIM], and outputs (mu, logvar) each of shape [B, LATENT_DIM].
 
 Downsampling path:
@@ -23,7 +23,7 @@ class Encoder(nn.Module):
     Maps a voxel feature volume + condition vector to VAE latent parameters.
 
     Args:
-        voxel_dim: Number of input channels (default VOXEL_DIM=33).
+        voxel_dim: Number of input channels (default VOXEL_DIM=35).
         cond_dim:  Dimension of the condition vector (default COND_DIM=209).
         latent_dim: Dimension of the latent space (default LATENT_DIM=128).
     """

@@ -59,7 +59,7 @@ def _rand_chunk_tensors(batch: int = B) -> dict[str, torch.Tensor]:
 # ---------------------------------------------------------------------------
 
 def test_block_state_encoder() -> None:
-    section("1. BlockStateEncoder — output shape [B, 33, 16, 16, 16]")
+    section("1. BlockStateEncoder — output shape [B, VOXEL_DIM, 16, 16, 16]")
     from ml.model.block_state import BlockStateEncoder, VOXEL_DIM
 
     enc = BlockStateEncoder()
@@ -84,9 +84,10 @@ def test_block_state_encoder() -> None:
 def test_encoder() -> None:
     section("2. Encoder — mu/logvar shape [B, 128]")
     from ml.model.encoder import Encoder
+    from ml.model.block_state import VOXEL_DIM
 
     enc  = Encoder()
-    x    = torch.randn(B, 33, C, C, C)
+    x    = torch.randn(B, VOXEL_DIM, C, C, C)
     c    = torch.zeros(B, CD)
     mu, logvar = enc(x, c)
 
@@ -280,14 +281,8 @@ def test_augmentation_rotation() -> None:
 
     # After 90° CW rotation, north→east
     r90 = augment_chunk(tensors, 90)
-    # rot90 with k=3 (CCW in torch terms for CW effect) moves position (0,0,0)
-    # to a different spatial location; we verify the facing VALUE at any position
-    # that originally held north now holds east.
-    original_north_positions = (tensors["facing"] == north_idx).nonzero(as_tuple=False)
-    remapped_values = r90["facing"][
-        original_north_positions[:, 0],   # x coords after rotation handled separately
-    ]
-    # Simpler check: count of east should increase by count of north in original
+    # Value-only check: every north becomes east. Position/facing consistency
+    # is checked separately in test_augmentation_geometry.
     original_north_count = (tensors["facing"] == north_idx).sum().item()
     rotated_east_count   = (r90["facing"]     == east_idx ).sum().item()
     assert rotated_east_count == original_north_count, (
@@ -512,6 +507,256 @@ def test_training_smoke() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Helpers for data-pipeline tests
+# ---------------------------------------------------------------------------
+
+def _blank_chunk() -> dict[str, torch.Tensor]:
+    from ml.model.block_state import AXIS_INDEX, FACING_INDEX, HALF_INDEX, SHAPE_INDEX
+    full = lambda v: torch.full((C, C, C), v, dtype=torch.int16)
+    return {
+        "block_ids": full(0),
+        "facing":    full(FACING_INDEX["none"]),
+        "axis":      full(AXIS_INDEX["none"]),
+        "half":      full(HALF_INDEX["none"]),
+        "shape":     full(SHAPE_INDEX["none"]),
+    }
+
+
+def _edge_of(x: int, z: int) -> str:
+    """Which edge of the chunk a position is on (+X = east, +Z = south)."""
+    return {0: "north", 15: "south"}.get(z) or {15: "east", 0: "west"}[x]
+
+
+# ---------------------------------------------------------------------------
+# 14. Augmentation geometry — positions and states rotate together
+# ---------------------------------------------------------------------------
+
+def test_augmentation_geometry() -> None:
+    section("14. Augmentation geometry — facing/axis/shape stay consistent with positions")
+    from ml.data.augmentation import augment_chunk, mirror_chunk
+    from ml.model.block_state import AXIS_INDEX, FACING_INDEX, SHAPE_INDEX
+
+    inv_f = {v: k for k, v in FACING_INDEX.items()}
+    inv_a = {v: k for k, v in AXIS_INDEX.items()}
+    inv_s = {v: k for k, v in SHAPE_INDEX.items()}
+
+    # One marker block on the north edge, facing outward (north), X-aligned, inner_left
+    t = _blank_chunk()
+    t["block_ids"][8, 0, 0] = 1
+    t["facing"][8, 0, 0]    = FACING_INDEX["north"]
+    t["axis"][8, 0, 0]      = AXIS_INDEX["x"]
+    t["shape"][8, 0, 0]     = SHAPE_INDEX["inner_left"]
+
+    expected = {90: ("east", "z"), 180: ("south", "x"), 270: ("west", "z")}
+    for rot, (edge, axis) in expected.items():
+        r = augment_chunk(t, rot)
+        x, _, z = (r["block_ids"] == 1).nonzero()[0].tolist()
+        facing = inv_f[r["facing"][x, 0, z].item()]
+        assert _edge_of(x, z) == edge, f"{rot}° CW: block should move to {edge} edge, got {_edge_of(x, z)}"
+        assert facing == edge, f"{rot}° CW: outward-facing block on {edge} edge faces {facing}"
+        assert inv_a[r["axis"][x, 0, z].item()] == axis, f"{rot}°: axis should be {axis}"
+        assert inv_s[r["shape"][x, 0, z].item()] == "inner_left", "rotation must not change handedness"
+        ok(f"{rot:3d}° CW: north edge -> {edge} edge, facing {facing}, axis {axis}")
+
+    m = mirror_chunk(t)
+    x, _, z = (m["block_ids"] == 1).nonzero()[0].tolist()
+    assert inv_s[m["shape"][x, 0, z].item()] == "inner_right", "mirror must swap inner_left -> inner_right"
+    assert inv_f[m["facing"][x, 0, z].item()] == "north", "X-mirror must not change north"
+    ok("mirror swaps inner_left -> inner_right, keeps north")
+
+    t2 = _blank_chunk()
+    t2["block_ids"][15, 0, 8] = 1
+    t2["facing"][15, 0, 8]    = FACING_INDEX["east"]
+    t2["shape"][15, 0, 8]     = SHAPE_INDEX["left"]
+    m2 = mirror_chunk(t2)
+    x, _, z = (m2["block_ids"] == 1).nonzero()[0].tolist()
+    assert _edge_of(x, z) == "west" and inv_f[m2["facing"][x, 0, z].item()] == "west"
+    assert inv_s[m2["shape"][x, 0, z].item()] == "right"
+    ok("mirror: east edge/east facing -> west edge/west facing, hinge left -> right")
+
+
+# ---------------------------------------------------------------------------
+# 15. Block property encoding round trip
+# ---------------------------------------------------------------------------
+
+def test_block_encoding() -> None:
+    section("15. block_encoding — Minecraft properties survive encode -> decode")
+    from ml.data.block_encoding import decode_properties, encode_properties, parse_block_string
+
+    cases = [
+        ("minecraft:oak_stairs",        {"facing": "east", "half": "top", "shape": "outer_right"}),
+        ("minecraft:oak_slab",          {"type": "top"}),
+        ("minecraft:oak_slab",          {"type": "double"}),
+        ("minecraft:oak_door",          {"facing": "north", "half": "upper", "hinge": "right"}),
+        ("minecraft:oak_door",          {"facing": "north", "half": "lower", "hinge": "left"}),
+        ("minecraft:white_bed",         {"facing": "south", "part": "head"}),
+        ("minecraft:chest",             {"facing": "west", "type": "left"}),
+        ("minecraft:spruce_log",        {"axis": "z"}),
+        ("minecraft:spruce_trapdoor",   {"facing": "west", "half": "bottom"}),
+        ("minecraft:tall_grass",        {"half": "upper"}),
+        ("minecraft:cobblestone",       {}),
+    ]
+    for name, props in cases:
+        got = decode_properties(name, *encode_properties(props))
+        assert got == props, f"{name} {props} -> {got}"
+    ok(f"{len(cases)} block states round-trip exactly (stairs, slabs, doors, beds, chests, logs)")
+
+    # Dropped properties don't break anything
+    f, a, h, s = encode_properties({"waterlogged": "true", "north": "true", "open": "false"})
+    assert decode_properties("minecraft:oak_fence", f, a, h, s) == {}
+    ok("uncaptured properties (fence connections, waterlogged, open) are dropped cleanly")
+
+    assert parse_block_string("minecraft:oak_log[axis=y]") == ("minecraft:oak_log", {"axis": "y"})
+    assert parse_block_string("minecraft:air") == ("minecraft:air", {})
+    ok("jigsaw final_state strings parse")
+
+
+# ---------------------------------------------------------------------------
+# 16. Template extractor + structure export (synthetic jar)
+# ---------------------------------------------------------------------------
+
+def _write_structure_nbt(size, palette, blocks) -> bytes:
+    """Build a gzipped vanilla structure .nbt in memory."""
+    import gzip, io
+    from nbtlib import Compound, File, Int, List, String
+
+    pal = []
+    for name, props in palette:
+        e = Compound({"Name": String(name)})
+        if props:
+            e["Properties"] = Compound({k: String(v) for k, v in props.items()})
+        pal.append(e)
+    blks = []
+    for pos, state, nbt in blocks:
+        b = Compound({"pos": List[Int](list(pos)), "state": Int(state)})
+        if nbt:
+            b["nbt"] = Compound({k: String(v) for k, v in nbt.items()})
+        blks.append(b)
+    f = File({"size": List[Int](list(size)), "palette": List[Compound](pal),
+              "blocks": List[Compound](blks), "entities": List[Compound]([])})
+    buf = io.BytesIO()
+    f.write(buf)
+    return gzip.compress(buf.getvalue())
+
+
+def test_template_extractor() -> None:
+    section("16. template_extractor + structure_export — synthetic jar round trip")
+    import zipfile
+    from ml.data.structure_export import save_structure, tensors_to_blocks
+    from ml.data.template_extractor import extract_villages, parse_template
+
+    palette = [
+        ("minecraft:cobblestone", {}),
+        ("minecraft:oak_door", {"facing": "north", "half": "lower", "hinge": "left"}),
+        ("minecraft:oak_door", {"facing": "north", "half": "upper", "hinge": "left"}),
+        ("minecraft:structure_void", {}),
+        ("minecraft:jigsaw", {"orientation": "north_up"}),
+        ("minecraft:air", {}),
+    ]
+    blocks = [
+        ((0, 0, 0), 0, None),                                   # cobblestone corner
+        ((1, 0, 0), 1, None), ((1, 1, 0), 2, None),             # door, lower + upper
+        ((2, 0, 0), 3, None),                                   # structure void -> air
+        ((2, 0, 2), 4, {"final_state": "minecraft:dirt_path"}), # jigsaw -> dirt_path
+        ((0, 1, 0), 5, None),                                   # explicit air
+    ]
+    house = _write_structure_nbt((4, 3, 4), palette, blocks)
+    too_big = _write_structure_nbt((17, 2, 4), [("minecraft:stone", {})], [((0, 0, 0), 0, None)])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jar = Path(tmp) / "fake.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("data/minecraft/structures/village/plains/houses/test_house.nbt", house)
+            z.writestr("data/minecraft/structures/village/plains/houses/huge_house.nbt", too_big)
+            z.writestr("data/minecraft/structures/village/plains/streets/test_street.nbt", house)
+            z.writestr("data/minecraft/structures/village/plains/zombie/houses/test_house.nbt", house)
+
+        out = Path(tmp) / "chunks"
+        index = extract_villages(jar, out)
+        assert list(index) == ["plains_houses_test_house.pt"], f"unexpected files: {list(index)}"
+        ok("only non-zombie houses that fit in 16³ are extracted (street, zombie, oversize skipped)")
+
+        index_z = extract_villages(jar, Path(tmp) / "chunks_z", include_zombie=True)
+        assert "plains_zombie_houses_test_house.pt" in index_z
+        ok("--include-zombie adds zombie variants")
+
+        vocab = json.loads((out / "vocab.json").read_text())
+        assert vocab["minecraft:air"] == 0
+        assert "minecraft:structure_void" not in vocab and "minecraft:jigsaw" not in vocab
+        rev = {v: k for k, v in vocab.items()}
+
+        t = torch.load(out / "plains_houses_test_house.pt", weights_only=True)
+        got = {(x, y, z): (n, p) for x, y, z, n, p in tensors_to_blocks(t, rev)}
+        # 4x4 footprint centred in 16 -> offset 6 in X and Z, resting on y=0
+        assert got == {
+            (6, 0, 6): ("minecraft:cobblestone", {}),
+            (7, 0, 6): ("minecraft:oak_door", {"facing": "north", "half": "lower", "hinge": "left"}),
+            (7, 1, 6): ("minecraft:oak_door", {"facing": "north", "half": "upper", "hinge": "left"}),
+            (8, 0, 8): ("minecraft:dirt_path", {}),
+        }, got
+        ok("blocks centred on floor; door halves/hinge kept; void -> air; jigsaw -> final_state")
+
+        # Exported structure file parses back to the same blocks
+        nbt_path = save_structure(Path(tmp) / "out.nbt", t, rev, include_air=False)
+        parsed = parse_template(nbt_path.read_bytes(), "plains", "houses", False, "out")
+        assert parsed.size == (16, 16, 16)
+        assert {(x, y, z): (n, p) for x, y, z, n, p in parsed.blocks} == got
+        ok("save_structure writes a valid structure .nbt that parses back identically")
+
+
+# ---------------------------------------------------------------------------
+# 17. BlockMetrics catches the "air everywhere" failure
+# ---------------------------------------------------------------------------
+
+def test_block_metrics() -> None:
+    section("17. BlockMetrics — all-air prediction scores high acc but zero solid_recall")
+    from ml.model.block_state import NUM_BLOCK_TYPES
+    from ml.train import BlockMetrics
+
+    target = torch.zeros(1, C, C, C, dtype=torch.long)
+    target[0, 4:8, 0:3, 4:8] = 5                         # small "house": ~1% of voxels
+
+    all_air = torch.zeros(1, NUM_BLOCK_TYPES, C, C, C)
+    all_air[:, 0] = 1.0
+    m = BlockMetrics(); m.update(all_air, target); s = m.summary()
+    assert s["acc"] > 0.98 and s["solid_recall"] == 0.0 and s["fill"] == 0.0, s
+    ok(f"all-air model: acc={s['acc']:.3f} but solid_recall={s['solid_recall']:.1f}, fill={s['fill']:.1f}")
+
+    perfect = torch.nn.functional.one_hot(target, NUM_BLOCK_TYPES).permute(0, 4, 1, 2, 3).float()
+    m = BlockMetrics(); m.update(perfect, target); s = m.summary()
+    assert s["solid_acc"] == 1.0 and s["precision"] == 1.0 and s["fill"] == 1.0, s
+    ok("perfect model: solid_acc=1, precision=1, fill=1")
+
+
+# ---------------------------------------------------------------------------
+# 18. Inference server — imports and serves /generate
+# ---------------------------------------------------------------------------
+
+def test_inference_server() -> None:
+    section("18. Inference server — module compiles, /generate returns a 16³ schematic")
+    import importlib
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["ML_CHECKPOINT_DIR"] = tmp                        # empty -> random model
+        os.environ["ML_FACTION_STORE"]  = str(Path(tmp) / "f.json")
+        sys.modules.pop("ml.inference", None)
+        inference = importlib.import_module("ml.inference")
+        inference._load_model()
+        client = inference.app.test_client()
+
+        assert client.get("/health").get_json()["model_loaded"] is True
+        resp = client.post("/generate", json={"faction_id": "test-faction", "face_north": "DOOR"})
+        assert resp.status_code == 200, resp.data[:500]
+        schem = resp.get_json()["schematic"]
+        assert len(schem) == 16 and len(schem[0]) == 16 and len(schem[0][0]) == 16
+        assert "properties" in schem[0][0][0]
+        ok("GET /health and POST /generate succeed; schematic is 16x16x16 with properties")
+
+        for k in ("ML_CHECKPOINT_DIR", "ML_FACTION_STORE"):
+            os.environ.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -529,10 +774,21 @@ TESTS = [
     test_faction_store,
     test_synthetic_dataset,
     test_training_smoke,
+    test_augmentation_geometry,
+    test_block_encoding,
+    test_template_extractor,
+    test_block_metrics,
+    test_inference_server,
 ]
 
 
 def main() -> None:
+    # Windows consoles default to cp1252, which can't print the box-drawing
+    # characters used in section headers.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
     failed: list[str] = []
 
     for test_fn in TESTS:

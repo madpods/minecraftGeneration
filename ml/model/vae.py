@@ -201,7 +201,11 @@ class ConditionalChunkVAE(nn.Module):
 # Loss function
 # ---------------------------------------------------------------------------
 
-def _ce_per_sample(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def _ce_per_sample(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    weight: torch.Tensor | None = None,
+) -> torch.Tensor:
     """
     Cross-entropy summed over all voxels, averaged over the batch.
 
@@ -209,8 +213,12 @@ def _ce_per_sample(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     B*16^3 positions) keeps the reconstruction term on the same per-sample
     scale as the KL term, which is a sum over latent dims per sample. With
     the mean, KL was ~4096x too strong and pushed toward posterior collapse.
+
+    `weight` is an optional per-class weight vector (e.g. to down-weight air).
     """
-    return F.cross_entropy(logits.float(), target.long(), reduction="sum") / logits.shape[0]
+    return F.cross_entropy(
+        logits.float(), target.long(), weight=weight, reduction="sum"
+    ) / logits.shape[0]
 
 
 def vae_loss(
@@ -219,6 +227,7 @@ def vae_loss(
     mu:        torch.Tensor,              # [B, LATENT_DIM]
     logvar:    torch.Tensor,              # [B, LATENT_DIM]
     kl_weight: float = 1.0,
+    block_class_weights: torch.Tensor | None = None,   # [NUM_BLOCK_TYPES]
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Multi-component ELBO loss.
@@ -236,12 +245,16 @@ def vae_loss(
     KL term: summed over latent dims, averaged over the batch, scaled by
     kl_weight (annealed during training).
 
+    block_class_weights optionally re-weights the block_id cross-entropy per
+    class. Village houses are ~95% air, so down-weighting air (index 0) keeps
+    the model from settling on "predict air everywhere".
+
     Returns:
         total_loss  — scalar
         recon_loss  — scalar (unweighted sum for logging)
         kl_loss     — scalar (unnormalized for logging)
     """
-    recon_block  = _ce_per_sample(outputs["block_id"], targets["block_id"])
+    recon_block  = _ce_per_sample(outputs["block_id"], targets["block_id"], block_class_weights)
     recon_facing = _ce_per_sample(outputs["facing"], targets["facing"])
     recon_axis   = _ce_per_sample(outputs["axis"], targets["axis"])
     recon_half   = _ce_per_sample(outputs["half"], targets["half"])

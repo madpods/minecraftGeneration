@@ -9,3 +9,7 @@ build/
 .env
 *.pt
 !ml/tests/fixtures/*.pt
+.venv/
+ml/data/chunks/
+ml/checkpoints/
+ml/samples/

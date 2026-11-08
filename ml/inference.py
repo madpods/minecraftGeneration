@@ -57,6 +57,7 @@ from ml.model.block_state import (
     LATENT_DIM,
     SHAPE_INDEX,
 )
+from ml.data.block_encoding import decode_properties
 from ml.model.faction import FactionStore
 from ml.model.vae import ConditionalChunkVAE
 
@@ -66,6 +67,9 @@ from ml.model.vae import ConditionalChunkVAE
 
 CHECKPOINT_DIR:  str = os.environ.get("ML_CHECKPOINT_DIR", "ml/checkpoints")
 FACTION_STORE_PATH: str = os.environ.get("ML_FACTION_STORE", "ml/factions.json")
+
+# Off until conditional training (Phase 5) actually trains the ConditionBuilder.
+USE_CONDITION_BUILDER: bool = os.environ.get("ML_USE_CONDITION_BUILDER", "0") == "1"
 
 # ---------------------------------------------------------------------------
 # Reverse vocab (integer → namespaced block ID)
@@ -115,7 +119,10 @@ _device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "c
 
 
 def _find_latest_checkpoint(checkpoint_dir: str) -> Path | None:
-    """Return the path to the most recently saved checkpoint, or None."""
+    """Return best.pt if present, else the most recent epoch checkpoint, or None."""
+    best = Path(checkpoint_dir) / "best.pt"
+    if best.exists():
+        return best
     ckpts = sorted(Path(checkpoint_dir).glob("checkpoint_epoch_*.pt"))
     return ckpts[-1] if ckpts else None
 
@@ -160,7 +167,7 @@ def _decode_block_state(
     axis_id:   int,
     half_id:   int,
     shape_id:  int,
-) -> dict[str, str | None]:
+) -> dict[str, Any]:
     """Convert integer indices back to human-readable block state dict."""
     _rev_facing = {v: k for k, v in FACING_INDEX.items()}
     _rev_axis   = {v: k for k, v in AXIS_INDEX.items()}
@@ -175,6 +182,9 @@ def _decode_block_state(
         "axis":   _rev_axis.get(axis_id,   "none"),
         "half":   _rev_half.get(half_id,   "none"),
         "shape":  _rev_shape.get(shape_id, "none"),
+        # Real Minecraft property names for this block (e.g. slab -> "type",
+        # door -> "half"/"hinge"), ready to apply to a BlockState.
+        "properties": decode_properties(ns_id, facing_id, axis_id, half_id, shape_id),
     }
 
 
@@ -234,19 +244,25 @@ def generate() -> Response:
     def _int(val: int) -> torch.Tensor:
         return torch.tensor([val], dtype=torch.long, device=_device)
 
-    condition = _model.condition_builder.build_condition(
-        tile_type      = _int(tile_type),
-        purpose        = _int(purpose),
-        face_n         = _int(face_ids[0]),
-        face_s         = _int(face_ids[1]),
-        face_e         = _int(face_ids[2]),
-        face_w         = _int(face_ids[3]),
-        face_u         = _int(face_ids[4]),
-        face_d         = _int(face_ids[5]),
-        size           = _scalar(size),
-        variance       = _scalar(faction.variance),
-        faction_vector = faction_z,
-    )  # [1, COND_DIM]
+    if USE_CONDITION_BUILDER:
+        condition = _model.condition_builder.build_condition(
+            tile_type      = _int(tile_type),
+            purpose        = _int(purpose),
+            face_n         = _int(face_ids[0]),
+            face_s         = _int(face_ids[1]),
+            face_e         = _int(face_ids[2]),
+            face_w         = _int(face_ids[3]),
+            face_u         = _int(face_ids[4]),
+            face_d         = _int(face_ids[5]),
+            size           = _scalar(size),
+            variance       = _scalar(faction.variance),
+            faction_vector = faction_z,
+        )  # [1, COND_DIM]
+    else:
+        # Training currently uses zero condition vectors, so the decoder has
+        # only ever seen zeros there; the ConditionBuilder is untrained and its
+        # output would be out-of-distribution noise. Match training.
+        condition = torch.zeros(1, COND_DIM, device=_device)
 
     # ------------------------------------------------------------------
     # Generate
@@ -311,8 +327,7 @@ if __name__ == "__main__":
     _load_model()
     _load_vocab(CHECKPOINT_DIR)
 
-    # Load faction store
-    global _faction_store, _faction_store_mtime
+    # Load faction store (module scope: plain assignment, no `global` needed)
     p = Path(FACTION_STORE_PATH)
     if p.exists():
         _faction_store = FactionStore.load(p)
