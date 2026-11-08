@@ -56,6 +56,10 @@ CHUNK_SIZE: int = 16
 LATENT_DIM: int = 128
 COND_DIM: int = 209
 
+# Number of learned style vectors (model.style_embed). The village data uses
+# 5 (desert, plains, savanna, snowy, taiga); the rest are spare.
+NUM_STYLES: int = 8
+
 # ---------------------------------------------------------------------------
 # Facing index mapping
 # ---------------------------------------------------------------------------

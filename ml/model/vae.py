@@ -19,6 +19,7 @@ from .block_state import (
     CHUNK_SIZE,
     COND_DIM,
     LATENT_DIM,
+    NUM_STYLES,
     BlockStateEncoder,
 )
 from .decoder import Decoder
@@ -127,6 +128,9 @@ class ConditionalChunkVAE(nn.Module):
         Encoder            — feature volume + condition → (mu, logvar)
         Decoder            — latent + condition → per-component logits
         ConditionBuilder   — building request → condition vector
+        style_embed        — learned style vector per style id (e.g. village
+                             biome), fed to the ConditionBuilder's faction
+                             slot for style-conditioned training
     """
 
     def __init__(
@@ -140,9 +144,53 @@ class ConditionalChunkVAE(nn.Module):
         self.encoder          = Encoder(latent_dim=latent_dim, cond_dim=cond_dim)
         self.decoder          = Decoder(latent_dim=latent_dim, cond_dim=cond_dim)
         self.condition_builder = ConditionBuilder(cond_dim=cond_dim)
+        self.style_embed      = nn.Embedding(NUM_STYLES, latent_dim)
 
         self.latent_dim = latent_dim
         self.cond_dim   = cond_dim
+
+    # ------------------------------------------------------------------
+    # Construction / conditioning helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        ckpt: dict[str, Any],
+        map_location: str | torch.device = "cpu",
+    ) -> "ConditionalChunkVAE":
+        """
+        Build a model from a checkpoint dict (as saved by ml.train).
+
+        Checkpoints from before style conditioning have no style_embed
+        weights; those are left at their initial values (they are unused by
+        an unconditional model).
+        """
+        model = cls().to(map_location)
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+        if unexpected or any(k != "style_embed.weight" for k in missing):
+            raise RuntimeError(f"Checkpoint mismatch: missing={missing} unexpected={unexpected}")
+        return model
+
+    def style_condition(self, style_vectors: torch.Tensor) -> torch.Tensor:
+        """
+        Condition vector for style-conditioned generation.
+
+        style_vectors: [B, LATENT_DIM] — a row of style_embed for a known
+        style, or any mix of them (e.g. 0.5 * desert + 0.5 * taiga).
+        The other ConditionBuilder inputs are held constant because the
+        training data has no labels for them yet.
+        """
+        B, dev = style_vectors.shape[0], style_vectors.device
+        zeros = torch.zeros(B, dtype=torch.long, device=dev)
+        return self.condition_builder.build_condition(
+            tile_type=zeros, purpose=zeros,
+            face_n=zeros, face_s=zeros, face_e=zeros,
+            face_w=zeros, face_u=zeros, face_d=zeros,
+            size=torch.full((B,), 0.5, device=dev),
+            variance=torch.zeros(B, device=dev),
+            faction_vector=style_vectors,
+        )
 
     def reparameterize(
         self,
@@ -183,18 +231,62 @@ class ConditionalChunkVAE(nn.Module):
         self,
         condition:  torch.Tensor,   # [B, COND_DIM]
         faction_z:  torch.Tensor,   # [B, LATENT_DIM]  — sampled build vector from FactionIdentity
+        occ_threshold: float | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Generate a chunk schematic from a faction latent vector + condition.
         Uses the faction_z directly (no encoder forward pass).
 
-        Returns dict of argmax-decoded integer tensors [B, 16, 16, 16].
+        occ_threshold: if given, a voxel is solid when P(not air) exceeds it
+        (see decode_block_ids); None uses plain argmax.
+
+        Returns dict of decoded integer tensors [B, 16, 16, 16].
         """
         self.eval()
         z_c     = torch.cat([faction_z, condition], dim=-1)
         logits  = self.decoder(z_c)
 
-        return {k: v.argmax(dim=1) for k, v in logits.items()}
+        out = {k: v.argmax(dim=1) for k, v in logits.items()}
+        out["block_id"] = decode_block_ids(logits["block_id"], occ_threshold)
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Occupancy view of the block logits
+# ---------------------------------------------------------------------------
+
+AIR_ID: int = 0
+
+
+def occupancy_logit(block_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Log-odds that a voxel is NOT air, derived from the block_id logits.
+
+    P(solid) = sum_{k != air} softmax_k, so
+    logit(P(solid)) = logsumexp(logits[non-air]) - logits[air].
+    [B, K, X, Y, Z] -> [B, X, Y, Z]
+    """
+    lf = block_logits.float()
+    return torch.logsumexp(lf[:, AIR_ID + 1:], dim=1) - lf[:, AIR_ID]
+
+
+def decode_block_ids(
+    block_logits: torch.Tensor,
+    occ_threshold: float | None = None,
+) -> torch.Tensor:
+    """
+    Turn block logits into block ids.
+
+    occ_threshold=None: plain argmax over all classes.
+    occ_threshold=t:    two-step decode — a voxel is solid if P(solid) > t,
+                        and solid voxels take the most likely non-air block.
+                        t is a density dial: lower = more blocks.
+    """
+    if occ_threshold is None:
+        return block_logits.argmax(dim=1)
+    solid = torch.sigmoid(occupancy_logit(block_logits)) > occ_threshold
+    types = block_logits[:, AIR_ID + 1:].argmax(dim=1) + AIR_ID + 1
+    return torch.where(solid, types, torch.full_like(types, AIR_ID))
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +313,35 @@ def _ce_per_sample(
     ) / logits.shape[0]
 
 
+def _ce_masked(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy summed over voxels where mask is True, averaged over the batch."""
+    ce = F.cross_entropy(logits.float(), target.long(), reduction="none")
+    return (ce * mask).sum() / logits.shape[0]
+
+
+def _occupancy_loss(
+    block_logits: torch.Tensor,
+    solid: torch.Tensor,
+    pos_weight: float,
+    focal_gamma: float,
+) -> torch.Tensor:
+    """Binary block-vs-air loss on the occupancy logit, summed over voxels / batch."""
+    logit = occupancy_logit(block_logits)
+    target = solid.float()
+    bce = F.binary_cross_entropy_with_logits(
+        logit, target,
+        pos_weight=torch.tensor(pos_weight, device=logit.device),
+        reduction="none",
+    )
+    if focal_gamma > 0:
+        # Focal loss: scale each voxel by (1 - p_correct)^gamma so the easy,
+        # confidently-empty space far from the building stops dominating.
+        p = torch.sigmoid(logit)
+        p_correct = torch.where(solid, p, 1 - p)
+        bce = bce * (1 - p_correct).pow(focal_gamma)
+    return bce.sum() / block_logits.shape[0]
+
+
 def vae_loss(
     outputs:   dict[str, torch.Tensor],   # raw logits from decoder
     targets:   dict[str, torch.Tensor],   # integer ground truth [B, 16, 16, 16]
@@ -228,6 +349,9 @@ def vae_loss(
     logvar:    torch.Tensor,              # [B, LATENT_DIM]
     kl_weight: float = 1.0,
     block_class_weights: torch.Tensor | None = None,   # [NUM_BLOCK_TYPES]
+    mode:           str   = "joint",
+    occ_pos_weight: float = 1.0,
+    focal_gamma:    float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Multi-component ELBO loss.
@@ -249,16 +373,40 @@ def vae_loss(
     class. Village houses are ~95% air, so down-weighting air (index 0) keeps
     the model from settling on "predict air everywhere".
 
+    mode="split" factorises the block term into two questions:
+        occupancy — is this voxel a block or air? Binary cross-entropy on
+                    occupancy_logit(), with `occ_pos_weight` on solid voxels
+                    and optional focal scaling (`focal_gamma`).
+        type      — which block? Cross-entropy over non-air classes, counted
+                    only on voxels that really are solid.
+    The facing/axis/half/shape terms are also counted only on solid voxels
+    (on air they would just be learning "none"). block_class_weights is
+    ignored in split mode.
+
     Returns:
         total_loss  — scalar
         recon_loss  — scalar (unweighted sum for logging)
         kl_loss     — scalar (unnormalized for logging)
     """
-    recon_block  = _ce_per_sample(outputs["block_id"], targets["block_id"], block_class_weights)
-    recon_facing = _ce_per_sample(outputs["facing"], targets["facing"])
-    recon_axis   = _ce_per_sample(outputs["axis"], targets["axis"])
-    recon_half   = _ce_per_sample(outputs["half"], targets["half"])
-    recon_shape  = _ce_per_sample(outputs["shape"], targets["shape"])
+    if mode == "joint":
+        recon_block  = _ce_per_sample(outputs["block_id"], targets["block_id"], block_class_weights)
+        recon_facing = _ce_per_sample(outputs["facing"], targets["facing"])
+        recon_axis   = _ce_per_sample(outputs["axis"], targets["axis"])
+        recon_half   = _ce_per_sample(outputs["half"], targets["half"])
+        recon_shape  = _ce_per_sample(outputs["shape"], targets["shape"])
+    elif mode == "split":
+        block_t = targets["block_id"].long()
+        solid   = block_t != AIR_ID
+        recon_block = (
+            _occupancy_loss(outputs["block_id"], solid, occ_pos_weight, focal_gamma)
+            + _ce_masked(outputs["block_id"][:, AIR_ID + 1:], (block_t - AIR_ID - 1).clamp(min=0), solid)
+        )
+        recon_facing = _ce_masked(outputs["facing"], targets["facing"], solid)
+        recon_axis   = _ce_masked(outputs["axis"],   targets["axis"],   solid)
+        recon_half   = _ce_masked(outputs["half"],   targets["half"],   solid)
+        recon_shape  = _ce_masked(outputs["shape"],  targets["shape"],  solid)
+    else:
+        raise ValueError(f"mode must be 'joint' or 'split', got {mode!r}")
 
     recon = (
         recon_block  * 1.0

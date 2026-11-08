@@ -28,7 +28,7 @@ Usage:
 Writes:
     <output-dir>/<biome>_[zombie_]<category>_<template>.pt   one per template
     <output-dir>/vocab.json    block name -> id (air = 0, rest sorted by name)
-    <output-dir>/index.json    file name  -> {biome, category, zombie, template, size, solid_blocks}
+    <output-dir>/index.json    file name  -> {biome, style, category, zombie, template, size, solid_blocks}
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ from .block_encoding import AIR_LIKE, encode_properties, parse_block_string
 
 VILLAGE_PREFIX = "data/minecraft/structures/village/"
 BIOMES = ("desert", "plains", "savanna", "snowy", "taiga")
+# Style id per biome, used as the condition label for --condition style
+STYLE_INDEX: dict[str, int] = {b: i for i, b in enumerate(BIOMES)}
 
 
 @dataclass
@@ -194,6 +196,7 @@ def extract_villages(
         torch.save(template_to_tensors(t, vocab), out / fname)
         index[fname] = {
             "biome":        t.biome,
+            "style":        STYLE_INDEX[t.biome],
             "category":     t.category,
             "zombie":       t.zombie,
             "template":     t.name,

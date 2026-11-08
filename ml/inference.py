@@ -22,7 +22,8 @@ POST /generate
       "face_east":   ...,
       "face_west":   ...,
       "face_up":     ...,
-      "face_down":   ...
+      "face_down":   ...,
+      "style":       "desert"        // optional; style-conditioned checkpoints only
     }
 
   Response JSON:
@@ -113,6 +114,9 @@ FACE_TYPE_INDEX: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 _model: ConditionalChunkVAE | None = None
+_model_config: dict[str, Any] = {}
+_occ_threshold: float | None = None          # tuned on validation during training
+_style_index: dict[str, int] = {}            # biome name -> style id (from index.json)
 _faction_store: FactionStore = FactionStore()
 _faction_store_mtime: float = 0.0
 _device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,7 +132,7 @@ def _find_latest_checkpoint(checkpoint_dir: str) -> Path | None:
 
 
 def _load_model() -> None:
-    global _model
+    global _model, _model_config, _occ_threshold, _style_index
     ckpt_path = _find_latest_checkpoint(CHECKPOINT_DIR)
     if ckpt_path is None:
         print(
@@ -138,9 +142,17 @@ def _load_model() -> None:
         _model = ConditionalChunkVAE().to(_device)
     else:
         ckpt = torch.load(ckpt_path, map_location=_device)
-        _model = ConditionalChunkVAE().to(_device)
-        _model.load_state_dict(ckpt["model_state"])
-        print(f"Loaded model from {ckpt_path} (epoch {ckpt.get('epoch', '?')})")
+        _model = ConditionalChunkVAE.from_checkpoint(ckpt, map_location=_device)
+        _model_config = ckpt.get("config", {})
+        _occ_threshold = ckpt.get("metrics", {}).get("val", {}).get("occ_threshold")
+        print(
+            f"Loaded model from {ckpt_path} (epoch {ckpt.get('epoch', '?')}, "
+            f"condition={_model_config.get('condition', 'none')}, occupancy threshold={_occ_threshold})"
+        )
+    index_path = Path(CHECKPOINT_DIR) / "index.json"
+    if index_path.exists():
+        import json
+        _style_index = {m["biome"]: m["style"] for m in json.loads(index_path.read_text()).values() if "style" in m}
     _model.eval()
 
 
@@ -244,7 +256,22 @@ def generate() -> Response:
     def _int(val: int) -> torch.Tensor:
         return torch.tensor([val], dtype=torch.long, device=_device)
 
-    if USE_CONDITION_BUILDER:
+    if _model_config.get("condition") == "style":
+        # Style-conditioned model: condition on a biome style vector. With no
+        # "style" in the request, use the average of all known styles.
+        style = data.get("style")
+        if style is not None:
+            sid = _style_index.get(str(style), style) if not str(style).isdigit() else int(style)
+            if not isinstance(sid, int):
+                return jsonify({"error": f"unknown style {style!r}; known: {sorted(_style_index)}"}), 400
+            style_vec = _model.style_embed(torch.tensor([sid], device=_device))
+        else:
+            ids = torch.tensor(sorted(_style_index.values()) or [0], device=_device)
+            style_vec = _model.style_embed(ids).mean(0, keepdim=True)
+        with torch.no_grad():
+            condition = _model.style_condition(style_vec)
+        # The faction's build vector stays the latent z (within-style variation)
+    elif USE_CONDITION_BUILDER:
         condition = _model.condition_builder.build_condition(
             tile_type      = _int(tile_type),
             purpose        = _int(purpose),
@@ -268,7 +295,7 @@ def generate() -> Response:
     # Generate
     # ------------------------------------------------------------------
     t0 = time.perf_counter()
-    decoded = _model.generate(condition, faction_z)   # dict of [1,16,16,16] int tensors
+    decoded = _model.generate(condition, faction_z, occ_threshold=_occ_threshold)   # dict of [1,16,16,16]
     gen_ms = int((time.perf_counter() - t0) * 1000)
 
     block_id_grid = decoded["block_id"][0].cpu().tolist()   # [16][16][16]

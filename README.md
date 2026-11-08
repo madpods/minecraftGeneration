@@ -34,7 +34,7 @@ minecraftGeneration/
 ├── ml/                     # Python ML pipeline  <-- implemented
 │   ├── model/              # VAE, encoder, decoder, block state, factions
 │   ├── data/               # data scraping, augmentation, dataset classes
-│   ├── tests/              # smoke test suite (18/18 passing)
+│   ├── tests/              # smoke test suite (21/21 passing)
 │   ├── docs/               # in-depth documentation
 │   ├── train.py            # training script
 │   ├── evaluate.py         # reconstructions / samples -> structure .nbt files
@@ -55,7 +55,7 @@ pip install -r ml/requirements.txt
 
 # 2. Run the smoke tests to verify everything is working
 python -m ml.tests.smoke_test
-# Expected: All 18/18 tests passed.
+# Expected: All 21/21 tests passed.
 
 # 3. Extract the vanilla village houses from your game jar
 python -m ml.data.template_extractor \
@@ -87,6 +87,7 @@ Without a data dir, `ml.train` falls back to random synthetic chunks, which only
 | [ml/docs/data_pipeline.md](ml/docs/data_pipeline.md) | Scraping .mca files, augmentation, dataset classes |
 | [ml/docs/training.md](ml/docs/training.md) | Training phases, CLI args, checkpoints, log output |
 | [ml/docs/inference_api.md](ml/docs/inference_api.md) | Flask API reference, request/response schemas |
+| [ml/docs/hpc.md](ml/docs/hpc.md) | Running training sweeps on the OSU CoE HPC (Slurm) |
 
 ## Implementation phases
 

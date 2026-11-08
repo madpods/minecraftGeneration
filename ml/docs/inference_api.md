@@ -72,9 +72,14 @@ Generate a 16×16×16 schematic tile conditioned on a faction identity and tile 
   "face_east":   "DOOR",
   "face_west":   "WALL",
   "face_up":     "NONE",
-  "face_down":   "FLOOR"
+  "face_down":   "FLOOR",
+  "style":       "desert"
 }
 ```
+
+`style` (optional) applies only to style-conditioned checkpoints (`--condition style`): a biome name from the training `index.json` (`desert`, `plains`, `savanna`, `snowy`, `taiga`) or its integer id. Without it, the server uses the average of all known style vectors. An unknown name returns HTTP 400. The faction's sampled build vector is still used as the latent z (variation within the style).
+
+The occupancy threshold tuned during training (density dial, see the training guide) is applied automatically when the checkpoint has one.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

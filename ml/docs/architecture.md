@@ -93,6 +93,10 @@ The condition vector encodes the tile's interface requirements and the requestin
 
 `COND_DIM = 209` was chosen so that `LATENT_DIM + COND_DIM = 337`, which factors as `128 × 2 × 2 × 2 + 209` with no padding needed.
 
+### Style vectors
+
+`ConditionalChunkVAE.style_embed` is an `nn.Embedding(NUM_STYLES=8, 128)` of learned style vectors (5 used by the village biomes). `model.style_condition(vectors)` feeds them through the `faction_vector` slot with the other ConditionBuilder inputs held constant (the training data has no labels for them yet). Because the input is just a vector, blends of styles are valid conditions. `ConditionalChunkVAE.from_checkpoint()` loads checkpoints from before this embedding existed.
+
 ## Loss function
 
 File: `ml/model/vae.py` — `vae_loss`
@@ -114,6 +118,10 @@ total = recon + kl_weight * kl
 `block_id` is weighted highest because predicting the wrong material is more damaging to visual quality than predicting a slightly wrong orientation.
 
 Each reconstruction term is cross-entropy summed over the 16³ voxels and averaged over the batch, so it sits on the same per-sample scale as the KL term. `logvar` is clamped to [-10, 10] in the encoder to keep `exp(logvar)` finite under fp16.
+
+### Occupancy view and split loss
+
+P(voxel is not air) can be read from the block logits: `occupancy_logit = logsumexp(logits[non-air]) − logits[air]`. `decode_block_ids(logits, threshold)` uses it for a two-step decode (solid if P > threshold, then the most likely non-air block), giving a density dial at generation time. `vae_loss(mode="split")` trains the same two questions directly: a binary occupancy loss (optional positive weight / focal γ) plus block-type cross-entropy over non-air classes on solid voxels only; the state heads are also masked to solid voxels. See [training.md](training.md#loss-modes).
 
 ## KL annealing
 

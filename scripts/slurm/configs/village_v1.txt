@@ -1,0 +1,33 @@
+# Village study v1: loss mode x dataset x style conditioning, 3 seeds each.
+# Same 17 held-out houses everywhere (--split-seed 14, all five biomes).
+# Format: <run-name> <ml.train args...>   (one run per line)
+
+# --- seed 0 ---
+houses_joint_air1.0_s0    --data-dir ml/data/houses --loss joint --air-weight 1.0 --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_joint_air0.3_s0    --data-dir ml/data/houses --loss joint --air-weight 0.3 --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_s0           --data-dir ml/data/houses --loss split --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_focal2_s0    --data-dir ml/data/houses --loss split --focal-gamma 2 --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_s0  --data-dir ml/data/extended --loss joint --air-weight 0.3 --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_s0         --data-dir ml/data/extended --loss split --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_style_s0 --data-dir ml/data/extended --loss joint --air-weight 0.3 --condition style --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_style_s0   --data-dir ml/data/extended --loss split --condition style --seed 0 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+
+# --- seed 1 ---
+houses_joint_air1.0_s1    --data-dir ml/data/houses --loss joint --air-weight 1.0 --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_joint_air0.3_s1    --data-dir ml/data/houses --loss joint --air-weight 0.3 --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_s1           --data-dir ml/data/houses --loss split --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_focal2_s1    --data-dir ml/data/houses --loss split --focal-gamma 2 --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_s1  --data-dir ml/data/extended --loss joint --air-weight 0.3 --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_s1         --data-dir ml/data/extended --loss split --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_style_s1 --data-dir ml/data/extended --loss joint --air-weight 0.3 --condition style --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_style_s1   --data-dir ml/data/extended --loss split --condition style --seed 1 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+
+# --- seed 2 ---
+houses_joint_air1.0_s2    --data-dir ml/data/houses --loss joint --air-weight 1.0 --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_joint_air0.3_s2    --data-dir ml/data/houses --loss joint --air-weight 0.3 --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_s2           --data-dir ml/data/houses --loss split --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+houses_split_focal2_s2    --data-dir ml/data/houses --loss split --focal-gamma 2 --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_s2  --data-dir ml/data/extended --loss joint --air-weight 0.3 --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_s2         --data-dir ml/data/extended --loss split --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_joint_air0.3_style_s2 --data-dir ml/data/extended --loss joint --air-weight 0.3 --condition style --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2
+extended_split_style_s2   --data-dir ml/data/extended --loss split --condition style --seed 2 --epochs 60 --repeat 8 --batch-size 16 --split-seed 14 --keep-checkpoints 2

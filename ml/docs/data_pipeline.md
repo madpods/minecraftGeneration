@@ -35,7 +35,14 @@ Output:
 
 - `<biome>_[zombie_]<category>_<template>.pt` — one tensor file per template
 - `vocab.json` — deterministic: air = 0, then all block names sorted
-- `index.json` — per-file metadata: biome, category, zombie, template name, original size, solid block count. The biome label is the intended first conditioning signal.
+- `index.json` — per-file metadata: biome, `style` (biome id: desert 0, plains 1, savanna 2, snowy 3, taiga 4), category, zombie, template name, original size, solid block count. `ChunkDataset` returns the style id as `condition_dict["style"]`; `ml.train --condition style` uses it.
+
+Two dataset variants used so far:
+
+| Data dir | Command flags | Files | Notes |
+|---|---|---|---|
+| `ml/data/houses` | (defaults) | 149 | normal houses |
+| `ml/data/extended` | `--categories houses,town_centers --include-zombie` | 245 | + 69 zombie houses (same layouts, decayed materials) and town centres; 241 usable after the train/val grouping |
 
 Note: houses are ~95% air inside a 16³ box (median 215 solid blocks out of 4096). See the training guide for metrics that account for this.
 

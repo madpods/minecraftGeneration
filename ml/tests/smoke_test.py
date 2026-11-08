@@ -718,12 +718,12 @@ def test_block_metrics() -> None:
 
     all_air = torch.zeros(1, NUM_BLOCK_TYPES, C, C, C)
     all_air[:, 0] = 1.0
-    m = BlockMetrics(); m.update(all_air, target); s = m.summary()
+    m = BlockMetrics(); m.update(all_air.argmax(1), target); s = m.summary()
     assert s["acc"] > 0.98 and s["solid_recall"] == 0.0 and s["fill"] == 0.0, s
     ok(f"all-air model: acc={s['acc']:.3f} but solid_recall={s['solid_recall']:.1f}, fill={s['fill']:.1f}")
 
     perfect = torch.nn.functional.one_hot(target, NUM_BLOCK_TYPES).permute(0, 4, 1, 2, 3).float()
-    m = BlockMetrics(); m.update(perfect, target); s = m.summary()
+    m = BlockMetrics(); m.update(perfect.argmax(1), target); s = m.summary()
     assert s["solid_acc"] == 1.0 and s["precision"] == 1.0 and s["fill"] == 1.0, s
     ok("perfect model: solid_acc=1, precision=1, fill=1")
 
@@ -757,6 +757,128 @@ def test_inference_server() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 19. Split loss, occupancy decode, threshold sweep
+# ---------------------------------------------------------------------------
+
+def test_split_loss_and_threshold() -> None:
+    section("19. Split loss + occupancy threshold decode + threshold sweep")
+    from ml.model.block_state import NUM_BLOCK_TYPES
+    from ml.model.vae import ConditionalChunkVAE, decode_block_ids, occupancy_logit, vae_loss
+    from ml.train import ThresholdSweep
+
+    model = ConditionalChunkVAE()
+    t = _rand_chunk_tensors()
+    t["block_ids"][t["block_ids"] > 20] = 0                       # mostly air, like real data
+    targets = {"block_id": t["block_ids"].long(), "facing": t["facing"].long(),
+               "axis": t["axis"].long(), "half": t["half"].long(), "shape": t["shape"].long()}
+    outputs, mu, logvar = model(*[t[k].long() for k in ("block_ids", "facing", "axis", "half", "shape")],
+                                torch.zeros(B, CD))
+    for kw in ({}, {"occ_pos_weight": 3.0}, {"focal_gamma": 2.0}):
+        total, recon, kl = vae_loss(outputs, targets, mu, logvar, 1.0, mode="split", **kw)
+        assert torch.isfinite(total), kw
+    total.backward()
+    assert any(p.grad is not None for p in model.parameters())
+    ok("split loss finite (plain / pos_weight / focal) and backprops")
+
+    # Hand-built logits: voxel 0 = confident air, voxel 1 = 60% solid split over blocks 5 and 6
+    logits = torch.full((1, NUM_BLOCK_TYPES, 1, 1, 2), -1e4)
+    logits[0, 0, 0, 0, 0] = 0.0
+    logits[0, 0, 0, 0, 1] = 0.0                      # air: weight 1
+    logits[0, 5, 0, 0, 1] = 0.4054651                # block 5: weight 1.5  -> P(solid) = 0.6
+    p_solid = torch.sigmoid(occupancy_logit(logits))
+    assert abs(p_solid[0, 0, 0, 1].item() - 0.6) < 1e-4
+    assert decode_block_ids(logits).tolist() == [[[[0, 5]]]]             # argmax: block 5 wins
+    assert decode_block_ids(logits, 0.5).tolist() == [[[[0, 5]]]]
+    assert decode_block_ids(logits, 0.7).tolist() == [[[[0, 0]]]]        # dial up -> air
+    ok("occupancy_logit = log-odds of not-air; threshold acts as a density dial")
+
+    sweep = ThresholdSweep()
+    sweep.update(logits, torch.tensor([[[[0, 5]]]]))
+    thr, m = sweep.best()
+    assert thr < 0.6 and m.summary()["solid_acc"] == 1.0, (thr, m.summary())
+    ok(f"ThresholdSweep picks a threshold that recovers the block (thr={thr})")
+
+
+# ---------------------------------------------------------------------------
+# 20. Train/val split groups buildings and is stable when data is added
+# ---------------------------------------------------------------------------
+
+def test_split_files_grouping() -> None:
+    section("20. split_files — zombie copies stay with their house; split stable as data grows")
+    from ml.train import split_files
+
+    def make(d: Path, names: list[tuple[str, bool, str]]) -> None:
+        d.mkdir()
+        index = {}
+        for template, zombie, category in names:
+            fname = f"plains_{'zombie_' if zombie else ''}{category}_{template}.pt"
+            torch.save({"block_ids": torch.zeros(1)}, d / fname)
+            index[fname] = {"biome": "plains", "style": 1, "category": category,
+                            "zombie": zombie, "template": template}
+        (d / "index.json").write_text(json.dumps(index))
+
+    houses = [(f"house_{i}", False, "houses") for i in range(60)]
+    extras = [(f"house_{i}", True, "houses") for i in range(60)] + [("well_1", False, "town_centers")]
+    with tempfile.TemporaryDirectory() as tmp:
+        make(Path(tmp) / "small", houses)
+        make(Path(tmp) / "big", houses + extras)
+        tr_s, va_s = split_files(Path(tmp) / "small", 0.2, 3)
+        tr_b, va_b = split_files(Path(tmp) / "big", 0.2, 3)
+
+        assert va_s and [f.name for f in va_s] == [f.name for f in va_b]
+        ok(f"same {len(va_s)} val houses with and without extra data")
+        val_templates = {f.name.split("_houses_")[1] for f in va_b}
+        leaked = [f.name for f in tr_b if f.name.split("_houses_")[-1] in val_templates]
+        assert not leaked, leaked
+        assert all("zombie" not in f.name and "town_centers" not in f.name for f in va_b)
+        ok("zombie copies of val houses are kept out of training; val is normal houses only")
+
+
+# ---------------------------------------------------------------------------
+# 21. Style conditioning, checkpoint compatibility, novelty check
+# ---------------------------------------------------------------------------
+
+def test_style_conditioning() -> None:
+    section("21. Style conditioning — labels, gradients, old checkpoints, nearest-neighbour")
+    from ml.data.dataset import ChunkDataset
+    from ml.evaluate import NearestNeighbour
+    from ml.model.vae import ConditionalChunkVAE
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        house = _blank_chunk()
+        house["block_ids"][2:6, 0:3, 2:9] = 7                         # an L-ish blob
+        house["block_ids"][2:4, 0:3, 9:12] = 7
+        torch.save(house, d / "a.pt")
+        torch.save(_blank_chunk(), d / "b.pt")
+        (d / "index.json").write_text(json.dumps({
+            "a.pt": {"biome": "desert", "style": 0, "category": "houses", "zombie": False, "template": "a"},
+            "b.pt": {"biome": "taiga", "style": 4, "category": "houses", "zombie": False, "template": "b"},
+        }))
+        ds = ChunkDataset(d, augment=False)
+        assert [ds[i][1]["style"] for i in range(2)] == [0, 4]
+        ok("ChunkDataset returns the biome style label from index.json")
+
+        nn = NearestNeighbour([d / "a.pt", d / "b.pt"])
+        rotated = torch.flip(torch.rot90(house["block_ids"], 1, dims=(0, 2)), dims=(0,))
+        name, iou = nn.query(rotated)
+        assert name == "a" and abs(iou - 1.0) < 1e-6, (name, iou)
+        ok("nearest-neighbour check sees through rotations/mirrors (rotated copy -> IoU 1.0)")
+
+    model = ConditionalChunkVAE()
+    cond = model.style_condition(model.style_embed(torch.tensor([0, 4])))
+    assert cond.shape == (2, CD)
+    assert not torch.allclose(cond[0], cond[1]), "different styles must give different conditions"
+    cond.sum().backward()
+    assert model.style_embed.weight.grad[[0, 4]].abs().sum() > 0
+    ok("style_condition: distinct per style, gradients reach style_embed")
+
+    old_state = {k: v for k, v in model.state_dict().items() if not k.startswith("style_embed")}
+    ConditionalChunkVAE.from_checkpoint({"model_state": old_state})
+    ok("checkpoints from before style conditioning still load")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -779,6 +901,9 @@ TESTS = [
     test_template_extractor,
     test_block_metrics,
     test_inference_server,
+    test_split_loss_and_threshold,
+    test_split_files_grouping,
+    test_style_conditioning,
 ]
 
 

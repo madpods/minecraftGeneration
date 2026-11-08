@@ -10,6 +10,9 @@ build/
 *.pt
 !ml/tests/fixtures/*.pt
 .venv/
-ml/data/chunks/
+ml/data/*/
 ml/checkpoints/
 ml/samples/
+logs/*
+!logs/.gitkeep
+.venv-gpu/

@@ -10,11 +10,13 @@ subclass or wrapper can supply them.
 
 Dataset returns:
     tensors_dict  — {block_ids, facing, axis, half, shape} each [16,16,16] int16
-    condition_dict — {} (empty dict; filled in by subclass for conditional training)
+    condition_dict — {"style": int} if the data dir has an index.json with
+                     style labels (village biome), else {}
 """
 
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 from typing import Any
@@ -61,6 +63,19 @@ class ChunkDataset(Dataset[tuple[dict[str, torch.Tensor], dict[str, Any]]]):
                 "Run ml.data.template_extractor (or chunk_scraper.scrape_world) first."
             )
 
+        # The village datasets are tiny (~10 MB), so load every file once up
+        # front instead of hitting the disk each step (which would starve a GPU).
+        self._cache: list[dict[str, torch.Tensor]] = [
+            torch.load(f, weights_only=True) for f in self.files
+        ]
+
+        # Style labels (village biome) from the template extractor's index.json
+        index_path = self.data_dir / "index.json"
+        index = json.loads(index_path.read_text()) if index_path.exists() else {}
+        self.styles: list[int] | None = None
+        if index and all("style" in index.get(f.name, {}) for f in self.files):
+            self.styles = [int(index[f.name]["style"]) for f in self.files]
+
     def __len__(self) -> int:
         return len(self.files) * self.repeat
 
@@ -68,9 +83,7 @@ class ChunkDataset(Dataset[tuple[dict[str, torch.Tensor], dict[str, Any]]]):
         self,
         idx: int,
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-        tensors: dict[str, torch.Tensor] = torch.load(
-            self.files[idx % len(self.files)], weights_only=True
-        )
+        tensors: dict[str, torch.Tensor] = self._cache[idx % len(self.files)]
 
         if self.augment:
             # Random rotation around Y axis
@@ -81,8 +94,10 @@ class ChunkDataset(Dataset[tuple[dict[str, torch.Tensor], dict[str, Any]]]):
             if random.random() < 0.5:
                 tensors = mirror_chunk(tensors)
 
-        # Phase 1: unconditional — no condition dict
+        # Style label when available (used by --condition style); else empty
         condition_dict: dict[str, Any] = {}
+        if self.styles is not None:
+            condition_dict["style"] = self.styles[idx % len(self.files)]
 
         return tensors, condition_dict
 

@@ -59,11 +59,15 @@ python -m ml.train \
 | `--batch-size` | `16` | Batch size; reduce if you hit OOM |
 | `--lr` | `1e-3` | Adam learning rate |
 | `--repeat` | `1` | Repeat the training file list N× per epoch (each pass gets fresh random augmentation) — use ~8 for the 149-house village set |
-| `--val-fraction` | `0.1` | Fraction of files held out for validation (split by file, deterministic from `--seed`); 0 disables |
-| `--air-weight` | `1.0` | Cross-entropy weight for the air class in the block_id loss; < 1 down-weights air |
+| `--val-fraction` | `0.1` | Fraction of buildings held out for validation (see [Validation split](#validation-split)); 0 disables |
+| `--loss` | `joint` | `joint`: one softmax over all blocks including air. `split`: block-vs-air occupancy loss + block-type loss on solid voxels only (see [Loss modes](#loss-modes)) |
+| `--air-weight` | `1.0` | (`joint`) cross-entropy weight for the air class; < 1 down-weights air |
+| `--occ-pos-weight` | `1.0` | (`split`) weight on solid voxels in the occupancy loss |
+| `--focal-gamma` | `0.0` | (`split`) focal-loss γ for the occupancy loss; 0 = plain BCE |
+| `--condition` | `none` | `none`: zero condition vector. `style`: learned per-biome style vector (needs `index.json` from the extractor) — see [Style conditioning](#style-conditioning) |
 | `--kl-anneal-epochs` | `20` | Epochs for kl_weight to ramp 0 → 1 |
 | `--num-workers` | `0` | DataLoader workers (0 is fine for small datasets and avoids Windows spawn overhead) |
-| `--seed` | `0` | Seed for the train/val split and torch RNG |
+| `--seed` | `0` | Seed for the train/val split and torch RNG. `--seed 14` holds out 17 houses covering all five biomes (4/4/3/4/2) on the village data |
 | `--resume` | `None` | Path to a checkpoint file to resume from |
 | `--chunk-size` | `16` | Must be 16; only accepted value (other values raise an error) |
 
@@ -141,7 +145,29 @@ Epoch   42/80 | loss=812.3  recon=760.1  kl=52.2  kl_w=1.000 | acc=0.972  solid_
   val      | loss=901.7  recon=850.2  kl=51.5              | acc=0.968  solid_acc=0.430  solid_recall=0.655  precision=0.770  fill=0.85
 ```
 
-Validation runs in eval mode (z = mu, no sampling noise).
+Validation runs in eval mode (z = mu, no sampling noise). A third line, `val@thr`, reports the same metrics at the **occupancy threshold** that gives the best solid-voxel F1 on the validation houses:
+
+```
+  val@thr  | best occupancy threshold 0.65                           | acc=0.942  solid_acc=0.132  ...
+```
+
+The threshold is the "density dial": a voxel is built if the model's P(not air) exceeds it, and solid voxels take the most likely non-air block. It works for both loss modes and is saved in the checkpoint (`metrics["val"]["occ_threshold"]`); `ml.evaluate` and the inference server use it automatically. Lower it for denser buildings, raise it for sparser ones, without retraining.
+
+## Validation split
+
+`split_files()` holds out whole buildings, not files. With an `index.json` from the template extractor, a zombie-village variant is grouped with its normal house (same biome/category/template name), so a held-out house can't leak into training through its decayed copy. Each building goes to validation based on a hash of `(seed, building)`, so adding more data (zombie variants, town centres) never changes which houses are held out — validation numbers stay comparable across dataset variants. Only normal houses are used for validation; other files from held-out groups are left out of training entirely.
+
+## Loss modes
+
+- **`--loss joint`** (default): one cross-entropy over all block classes including air. Simple, but air is ~95% of the voxels and dominates; `--air-weight` < 1 counteracts this.
+- **`--loss split`**: asks two separate questions.
+  - *Occupancy* — is this voxel a block? Binary cross-entropy on P(not air) (derived from the same block logits, so no architecture change), with `--occ-pos-weight` and optional focal scaling `--focal-gamma` (down-weights the easy, confidently empty space far from the building).
+  - *Type* — which block? Cross-entropy over non-air classes, counted only on voxels that really hold a block.
+  - The facing/axis/half/shape terms also count only on solid voxels.
+
+## Style conditioning
+
+`--condition style` gives the model a learned 128-d **style vector** per village biome (`model.style_embed`, ids from `index.json`), passed through the `ConditionBuilder`'s faction slot. The latent z then only has to capture variation *within* a style. At generation time any style vector can be used — a biome's own, or a blend such as `0.5·desert + 0.5·taiga` — which is the same vector arithmetic the faction system is built on. `ml.evaluate` samples every biome, checks each sample with a block-palette biome classifier, and writes desert→taiga blends.
 
 | Field | Meaning |
 |---|---|
@@ -171,7 +197,7 @@ After training, run the smoke test to verify the model checkpoint loads and gene
 python -m ml.tests.smoke_test
 ```
 
-All 18 tests should pass. Test 13 exercises a 2-epoch training loop end-to-end and verifies the checkpoint format; tests 14–18 cover augmentation geometry, property encoding, the template extractor/exporter, the air-aware metrics, and the inference server.
+All 21 tests should pass. Test 13 exercises a 2-epoch training loop end-to-end and verifies the checkpoint format; tests 14–18 cover augmentation geometry, property encoding, the template extractor/exporter, the air-aware metrics, and the inference server; 19–21 cover the split loss and density threshold, the building-grouped validation split, and style conditioning.
 
 ## Evaluating a checkpoint
 

@@ -1,0 +1,3 @@
+*.sh text eol=lf
+*.sbatch text eol=lf
+scripts/slurm/configs/*.txt text eol=lf
